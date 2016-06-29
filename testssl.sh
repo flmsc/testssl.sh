@@ -7097,10 +7097,26 @@ check_resolver_bins() {
      return 0
 }
 
+# check if multiple nameservers are configured. if so, return the full list. otherwise, return nothing.
+check_multiple_nameservers() {
+     # macos through scutil
+     if which scutil > /dev/null && [[ $(scutil --dns  | grep "nameserver\[\d]" | sort | uniq | awk '{ print $3}' | wc -l) -gt 1 ]]; then
+          echo "$(scutil --dns  | grep 'nameserver\[\d]' | sort | uniq | awk '{ print $3}')"
+     # if scutil is not available, try /etc/resolv.conf
+     elif [[ -f /etc/resolv.conf && $(cat /etc/resolv.conf | grep "^nameserver" | awk '{ print $2 }' | wc -l) -gt 1 ]]; then
+          echo "$(cat /etc/resolv.conf | grep '^nameserver' | awk '{ print $2 }')"
+     else
+          echo ""
+     fi
+}
+
 # arg1: a host name. Returned will be 0-n IPv4 addresses
+# arg2 (optional): which nameserver to query
 get_a_record() {
      local ip4=""
      local saved_openssl_conf="$OPENSSL_CONF"
+     local nameservers=$(check_multiple_nameservers)
+     local nsparam=""
 
      OPENSSL_CONF=""                         # see https://github.com/drwetter/testssl.sh/issues/134
      if [[ "$NODE" == *.local ]]; then
@@ -7113,21 +7129,42 @@ get_a_record() {
           fi
      fi
      if [[ -z "$ip4" ]]; then
+          if [[ $(filter_ip4_address $2) ]]; then
+               nsparam="\"@$2\""
+          fi
           which dig &> /dev/null && \
-               ip4=$(filter_ip4_address $(dig +short -t a "$1" 2>/dev/null | sed '/^;;/d'))
+               ip4=$(filter_ip4_address $(dig $nsparam +short -t a "$1" 2>/dev/null | sed '/^;;/d'))
      fi
      if [[ -z "$ip4" ]]; then
+          if [[ $(filter_ip4_address $2) ]]; then
+               nsparam="\"$2\""
+          fi
           which host &> /dev/null && \
-               ip4=$(filter_ip4_address $(host -t a "$1" 2>/dev/null | grep -v alias | sed 's/^.*address //'))
+               ip4=$(filter_ip4_address $(host -t a "$1" $nsparam 2>/dev/null | grep -v alias | sed 's/^.*address //'))
      fi
      if [[ -z "$ip4" ]]; then
+          if [[ $(filter_ip4_address $2) ]]; then
+               nsparam="\"@$2\""
+          fi
           which drill &> /dev/null && \
-               ip4=$(filter_ip4_address $(drill a "$1" 2>/dev/null | awk '/^\;\;\sANSWER\sSECTION\:$/,/\;\;\sAUTHORITY\sSECTION\:$/ { print $5,$6 }' | sed '/^\s$/d'))
+               ip4=$(filter_ip4_address $(drill a "$1" $nsparam 2>/dev/null | awk '/^\;\;\sANSWER\sSECTION\:$/,/\;\;\sAUTHORITY\sSECTION\:$/ { print $5,$6 }' | sed '/^\s$/d'))
      fi
      if [[ -z "$ip4" ]]; then
           if which nslookup &>/dev/null; then
-               ip4=$(filter_ip4_address $(nslookup -querytype=a "$1" 2>/dev/null | awk '/^Name/,/EOF/ { print $0 }' | grep -v Name))
+               if [[ $(filter_ip4_address $2) ]]; then
+                    nsparam="\"@$2\""
+               fi
+               ip4=$(filter_ip4_address $(nslookup -querytype=a "$1" $nsparam 2>/dev/null | awk '/^Name/,/EOF/ { print $0 }' | grep -v Name))
           fi
+     fi
+     if [[ -z "$ip4" ]]; then
+          for nameserver in $nameservers
+          do
+               $ip4=$(get_a_record $1 $nameserver)
+               if [[ "$ip4" ]]; then
+                    break
+               fi
+          done
      fi
      OPENSSL_CONF="$saved_openssl_conf"      # see https://github.com/drwetter/testssl.sh/issues/134
      echo "$ip4"
